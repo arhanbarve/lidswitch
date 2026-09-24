@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="0.3" y2="1"><stop offset="0" stop-color="#2c3878"/><stop offset="0.6" stop-color="#151c45"/><stop offset="1" stop-color="#090d22"/></linearGradient>
+<radialGradient id="glow" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#ffd27a"/><stop offset="0.4" stop-color="#ff9e40" stop-opacity="0.55"/><stop offset="1" stop-color="#ff8a2a" stop-opacity="0"/></radialGradient>
+<linearGradient id="wedge" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ffb24d" stop-opacity="0.2"/><stop offset="1" stop-color="#ffe1a0"/></linearGradient>
+<linearGradient id="lid" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f7f9fd"/><stop offset="1" stop-color="#b4bdd1"/></linearGradient>
+<linearGradient id="base" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e3e8f2"/><stop offset="1" stop-color="#8e98b0"/></linearGradient>
+<linearGradient id="moon" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff0c4"/><stop offset="1" stop-color="#ffcf6e"/></linearGradient>
+<filter id="blur" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="28"/></filter>
+<filter id="soft" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="10"/></filter>
+<clipPath id="sq"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath>
+</defs>
+<rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+<g clip-path="url(#sq)">
+  <g fill="#fff"><circle cx="240" cy="250" r="7" opacity=".85"/><circle cx="330" cy="340" r="4.5" opacity=".55"/><circle cx="430" cy="215" r="5.5" opacity=".7"/><circle cx="205" cy="410" r="4" opacity=".45"/><circle cx="540" cy="310" r="4" opacity=".5"/></g>
+  <path d="M 745 205 a 125 125 0 1 0 75 225 a 102 102 0 1 1 -75 -225 z" fill="url(#moon)"/>
+  <ellipse cx="560" cy="640" rx="330" ry="95" fill="url(#glow)" filter="url(#blur)"/>
+  <polygon points="215,622 812,622 812,546" fill="url(#wedge)" filter="url(#soft)"/>
+  <polygon points="225,626 806,626 806,550" fill="url(#wedge)" opacity=".8"/>
+  <g transform="rotate(-8 215 612)"><rect x="200" y="590" width="640" height="30" rx="15" fill="url(#lid)"/></g>
+  <rect x="190" y="628" width="660" height="42" rx="21" fill="url(#base)"/>
+  <rect x="460" y="628" width="120" height="11" rx="5.5" fill="#6f7892"/>
+  <ellipse cx="520" cy="700" rx="300" ry="14" fill="#000" opacity=".35" filter="url(#soft)"/>
+</g>
+</svg>

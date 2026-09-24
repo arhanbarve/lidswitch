@@ -22,6 +22,8 @@ What install puts on the system:
 | `/Applications/Lidswitch.app` (root-owned) | the app |
 | `~/Library/Logs/lidswitch.log` | every ON / OFF / refusal / failure |
 
+App icon: `design/icon.svg`; after editing it run `design/make-icon.sh` to regenerate `Resources/AppIcon.icns`.
+
 ## Use
 
 Icon: 🌙 `moon.zzz` = normal sleep · ☕ `cup.and.saucer.fill` = staying awake · ⚠ = error (menu says what).
