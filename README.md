@@ -48,12 +48,12 @@ Refuses to turn ON under the same conditions.
 `./verify.sh` after install (as you, not sudo): checks install layout, that sudo allows exactly the 2 commands and nothing else, T3, T4 and T17. Takes up to ~7 min.
 
 Manual checklist after install (these need the real lid / root):
-- [ ] T1 ON, close lid 60s, `pmset -g log | grep -iE 'Sleep  '` shows no new sleep
-- [ ] T2 OFF, close lid, Mac sleeps
+- [x] T1 (you, 2026-09-24) ON, close lid 60s, `pmset -g log | grep -iE 'Sleep  '` shows no new sleep
+- [x] T2 (you, 2026-09-24) OFF, close lid, Mac sleeps
 - [x] T3 (verify.sh, 2026-09-23) `sudo pmset -a disablesleep 1` by hand, close lid, lidswitch turns it OFF + notifies
 - [x] T4 (verify.sh, 2026-09-23) ON, then `pkill -9 Lidswitch`, app relaunches in ~10s and turns it OFF
 - [ ] T5 ON 30 min, lid closed, sleeps at expiry (warning at 25 min)
 - [ ] T9 ON, reboot, `ioreg -rd1 -c IOPMrootDomain | grep SleepDisabled` = No
 - [ ] T11 `sudo rm /etc/sudoers.d/lidswitch`, relaunch app, ⚠ icon, ON items hidden
-- [ ] T13 ON, Apple menu → Sleep does nothing (expected side effect)
+- [x] T13 (you, 2026-09-24) ON, Apple menu → Sleep does nothing (expected side effect)
 - [ ] T14 `sudo ./uninstall.sh`, all paths above gone
