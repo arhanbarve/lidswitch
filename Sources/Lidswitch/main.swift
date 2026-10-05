@@ -284,11 +284,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
 
         // Caffeinate: idle sleep only. Separate from the lid override above.
         menu.addItem(.separator())
-        info(caffeinated.isEmpty ? "Not caffeinated" : "Caffeinated (idle sleep only, not lid): \(caffeinated.count)")
+        info(caffeinated.isEmpty ? "Caffeinate: off"
+                                 : "Caffeinate: \(caffeinated.count) running (closing the lid still sleeps)")
         for c in caffeinated {
-            let m = max(0, Int(Date().timeIntervalSince(c.started) / 60))
-            action("Stop caffeinate \(c.args.isEmpty ? "pid \(c.pid)" : c.args) · up \(m / 60)h \(m % 60)m",
-                   #selector(menuStopCaffeinate), Int(c.pid))
+            action("Stop: \(Caffeinate.describe(c))", #selector(menuStopCaffeinate), Int(c.pid))
+            menu.items.last?.toolTip = "caffeinate \(c.args.joined(separator: " ")) (pid \(c.pid))"
         }
         let sub = NSMenu()
         for d in Caffeinate.durations {
@@ -296,7 +296,8 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
             let i = NSMenuItem(title: "\(h) hour\(h == 1 ? "" : "s")", action: #selector(menuCaffeinate), keyEquivalent: "")
             i.target = self; i.tag = h; sub.addItem(i)
         }
-        let c = NSMenuItem(title: "Caffeinate (caffeinate -dim)", action: nil, keyEquivalent: "")
+        let c = NSMenuItem(title: "Caffeinate (screen on, no idle sleep)", action: nil, keyEquivalent: "")
+        c.toolTip = "Runs caffeinate -dim -t <hours>. Closing the lid still sleeps the Mac."
         c.submenu = sub
         menu.addItem(c)
 

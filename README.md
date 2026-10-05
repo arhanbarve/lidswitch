@@ -30,7 +30,7 @@ Icon: 🌙 `moon.zzz` = normal sleep · ☕ `cup.and.saucer.fill` = staying awak
 Menu → "Stay awake 30 min … 8 hours" (default 2h). While on: "+1 hour" (max 8h left), "Turn off now".
 Quitting the app restores lid sleep.
 
-Icon `mug` (outline) = a `caffeinate` is running (anyone's, lid override off). Menu lists each one with
+Icon `mug` (outline) = a `caffeinate` is running (anyone's, lid override off). Menu lists each one in plain words (e.g. "screen on, no idle sleep · 58m left"; hover for the raw flags) with
 "Stop", and "Caffeinate ▸ 1–8 hours" starts `caffeinate -dim -t N` (no `-s`, so it can't block
 the sleep lidswitch requests when an override ends with the lid shut). Caffeinate only stops
 idle sleep; closing the lid still sleeps the Mac. Exits update the icon instantly; a caffeinate
