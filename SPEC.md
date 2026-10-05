@@ -45,6 +45,7 @@ Machine: Mac17,8 / M5 Pro, macOS 27.0 (26A428).
 | Lid position readable without root | `AppleClamshellState` (Yes = closed) |
 | Battery / power source readable without root | `pmset -g ps` |
 | Thermal warnings readable without root | `pmset -g therm` |
+| Clearing the flag while the lid is **already closed** does NOT sleep the Mac; app must request sleep (`IOPMSleepSystem`, no root) | 2026-09-24: flag cleared 12:02:18 lid closed, still awake 12:03:05; `IOPMSleepSystem` as user → "Software Sleep" 12:03:54 |
 
 Side effects of `SleepDisabled = 1` (important):
 - Blocks **all** sleep: lid, Apple-menu Sleep, idle sleep. Screen still turns off.

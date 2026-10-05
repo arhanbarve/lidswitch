@@ -8,7 +8,8 @@ import UserNotifications
 let kClamshellStateChange: natural_t = 0xE003_4100
 
 final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
-    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    static let showMenuNote = Notification.Name("com.arhanbarve.lidswitch.showMenu")
+    var item: NSStatusItem!  // created once the app has finished launching, not at init
     let menu = NSMenu()
 
     // Owned state. Only this process may hold the flag ON (Q6).
@@ -25,14 +26,20 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
     var interest: io_object_t = 0
     var sigterm: DispatchSourceSignal?
     var noNap: NSObjectProtocol?  // held only while ON so App Nap can't delay the auto-off
+    var caffeinated: [Caffeinate.Proc] = []
+    var caffeineWatch: [pid_t: DispatchSourceProcess] = [:]  // exit events, so the icon updates without polling
 
     var canNotify: Bool { Bundle.main.bundleIdentifier != nil }
 
     // MARK: lifecycle
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         menu.delegate = self
         item.menu = menu
+        DistributedNotificationCenter.default().addObserver(
+            forName: App.showMenuNote, object: nil, queue: .main
+        ) { [weak self] _ in self?.showMenu() }
         ruleInstalled = SystemState.sudoRuleInstalled()
         if !ruleInstalled { error = "sudo rule missing, run install.sh" }
 
@@ -81,6 +88,22 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
             Log.write("quit → OFF (flag now \(flagText()))")
         }
         return .terminateNow
+    }
+
+    /// Opening the app again (Finder, Spotlight, Launchpad) shows the menu instead of doing nothing.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        showMenu()
+        return false
+    }
+
+    /// Drops the menu from the icon; if macOS is hiding the icon, at the mouse.
+    /// A hidden item's window is 0 pt tall at (0,0) while occlusionState still says visible (macOS 27).
+    func showMenu() {
+        if let b = item.button, let h = b.window?.frame.height, h > 0 {
+            b.performClick(nil)
+        } else {
+            menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
+        }
     }
 
     func watchLid() {
@@ -149,6 +172,10 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
             error = ruleInstalled ? nil : error
             Log.write("OFF: \(reason)")
             if reason != "turned off by you" { notify("Lid sleep restored", reason) }
+            // Lid already shut (or unknown → treat as shut): macOS won't sleep on its own.
+            if SystemState.lidClosed() != false {
+                Log.write("lid closed at OFF → sleep now (\(SystemState.sleepNow() ? "ok" : "FAILED"))")
+            }
         } else {
             // Leave error visible; the 5-min safety check and every event will retry.
             error = "FAILED to turn off! Run: sudo pmset -a disablesleep 0"
@@ -196,10 +223,25 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
         switch SystemState.sleepDisabled() { case true?: "ON"; case false?: "OFF"; default: "UNKNOWN" }
     }
 
+    /// In-process scan (no subprocess). Runs on every existing event; exits are watched directly.
+    func refreshCaffeinate() {
+        caffeinated = Caffeinate.running()
+        let pids = Set(caffeinated.map(\.pid))
+        for (pid, s) in caffeineWatch where !pids.contains(pid) { s.cancel(); caffeineWatch[pid] = nil }
+        for pid in pids where caffeineWatch[pid] == nil {
+            let s = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
+            s.setEventHandler { [weak self] in self?.updateIcon() }
+            s.resume()
+            caffeineWatch[pid] = s
+        }
+    }
+
     func updateIcon() {
+        refreshCaffeinate()
         let symbol: String
         if error != nil { symbol = "exclamationmark.triangle" }
         else if owned { symbol = "cup.and.saucer.fill" }
+        else if !caffeinated.isEmpty { symbol = "mug" }
         else { symbol = "moon.zzz" }
         let img = NSImage(systemSymbolName: symbol, accessibilityDescription: "lidswitch")
         img?.isTemplate = true
@@ -208,6 +250,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        updateIcon()  // also refreshes `caffeinated`
         let s = snapshot()
         func info(_ t: String) { let i = NSMenuItem(title: t, action: nil, keyEquivalent: ""); i.isEnabled = false; menu.addItem(i) }
         func action(_ t: String, _ sel: Selector, _ tag: Int = 0) {
@@ -238,10 +281,38 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
             }
         }
         if let l = lastOff { menu.addItem(.separator()); info("Last auto-off: \(l)") }
+
+        // Caffeinate: idle sleep only. Separate from the lid override above.
+        menu.addItem(.separator())
+        info(caffeinated.isEmpty ? "Not caffeinated" : "Caffeinated (idle sleep only, not lid): \(caffeinated.count)")
+        for c in caffeinated {
+            let m = max(0, Int(Date().timeIntervalSince(c.started) / 60))
+            action("Stop caffeinate \(c.args.isEmpty ? "pid \(c.pid)" : c.args) · up \(m / 60)h \(m % 60)m",
+                   #selector(menuStopCaffeinate), Int(c.pid))
+        }
+        let sub = NSMenu()
+        for d in Caffeinate.durations {
+            let h = Int(d / 3600)
+            let i = NSMenuItem(title: "\(h) hour\(h == 1 ? "" : "s")", action: #selector(menuCaffeinate), keyEquivalent: "")
+            i.target = self; i.tag = h; sub.addItem(i)
+        }
+        let c = NSMenuItem(title: "Caffeinate (caffeinate -dim)", action: nil, keyEquivalent: "")
+        c.submenu = sub
+        menu.addItem(c)
+
         menu.addItem(.separator())
         action("Quit (restores lid sleep)", #selector(menuQuit))
     }
 
+    @objc func menuCaffeinate(_ i: NSMenuItem) {
+        let ok = Caffeinate.start(TimeInterval(i.tag * 3600))
+        Log.write("caffeinate \(i.tag)h \(ok ? "started" : "FAILED to start")")
+        updateIcon()
+    }
+    @objc func menuStopCaffeinate(_ i: NSMenuItem) {
+        let ok = Caffeinate.stop(pid_t(i.tag))
+        Log.write("caffeinate pid \(i.tag) stop \(ok ? "sent" : "FAILED")")
+    }
     @objc func menuOn(_ i: NSMenuItem) { turnOn(TimeInterval(i.tag * 60)) }
     @objc func menuOff() { turnOff("turned off by you") }
     @objc func menuExtend() { extend() }
@@ -268,6 +339,17 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
                                 withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) {
         done([.banner, .sound])
     }
+}
+
+// One copy only. Two copies each see the other's ON as "not ours" and turn it off (log, 2026-10-04).
+// A second launch (Spotlight, Finder, dev build) shows the running copy's menu and exits 0, before
+// any quit handler that would touch the flag. flock is released by the kernel when we die.
+let lockPath = FileManager.default.temporaryDirectory.appendingPathComponent("com.arhanbarve.lidswitch.lock").path
+let lockFD = open(lockPath, O_CREAT | O_RDWR, 0o600)
+if lockFD >= 0 && flock(lockFD, LOCK_EX | LOCK_NB) != 0 {
+    DistributedNotificationCenter.default().postNotificationName(
+        App.showMenuNote, object: nil, userInfo: nil, deliverImmediately: true)
+    exit(0)
 }
 
 let app = NSApplication.shared

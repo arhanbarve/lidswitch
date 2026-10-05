@@ -1,6 +1,7 @@
 import Foundation
 import IOKit
 import IOKit.ps
+import IOKit.pwr_mgt
 import LidswitchCore
 
 /// In-process reads (no subprocesses) and the one privileged write.
@@ -49,6 +50,16 @@ enum SystemState {
         case .critical: .critical
         @unknown default: .critical  // unknown → most restrictive
         }
+    }
+
+    /// Clearing SleepDisabled while the lid is already shut does NOT make macOS sleep
+    /// (tested 2026-09-24: stayed awake 47s+), so ask for sleep explicitly. Same call as `pmset sleepnow`.
+    @discardableResult
+    static func sleepNow() -> Bool {
+        let pm = IOPMFindPowerManagement(kIOMainPortDefault)
+        guard pm != 0 else { return false }
+        defer { IOServiceClose(pm) }
+        return IOPMSleepSystem(pm) == kIOReturnSuccess
     }
 
     /// Runs `sudo -n pmset -a disablesleep 0|1`. Never prompts. Returns exit status == 0.
