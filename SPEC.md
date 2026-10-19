@@ -15,13 +15,19 @@ Status: built 2026-09-23, "very restrictive" mode: every unknown → OFF, app bi
 | Q6 | Flag ON but not started by lidswitch (manual pmset, stale from before) | **Turn OFF immediately** + notify. Only lidswitch may hold it ON |
 | Q7 | Quit / crash | Quit = OFF first. Crash → launchd KeepAlive relaunches app → Q6 rule kills the orphaned ON. Boot LaunchDaemon forces OFF every restart. No separate watchdog |
 | Q8 | Heat cutoff (`ProcessInfo.thermalState`) | Lid closed **and** on battery (likely bag) → OFF at **fair**. Otherwise (AC / lid open) → OFF at **serious**. Critical → always OFF. Replaces Q1's "any thermal warning" |
+| Q9 | Sound with lid closed (2026-10-06) | Override ON **and** lid closed (unknown = closed) → built-in speakers muted, and re-muted at once if anything unmutes them. Held until the lid opens, even if the override ends first; then the previous mute state is put back. Speakers only: AirPods / headphones / displays keep playing. Volume level never touched |
+| Q10 | Wi-Fi lost with lid closed (2026-10-13) | For walking out of Wi-Fi range with the Mac in a bag. Override ON **and** lid closed (unknown = closed) **and** no working network on any interface for 10 s → join the saved iPhone hotspot. Retry 5, 10, 20, 30 s apart, then every 30 s; give up 5 min into the outage with a notification. A new outage, or lid open then closed, starts again. The override is never touched by any of this. Lidswitch never leaves a network: on lid open it notifies that it is on the hotspot. Name + password entered once in a menu dialog; password in the login Keychain. App signed with the Apple Development certificate so the Keychain item and the Location Services grant survive rebuilds. No tmux / agent nudging |
 
 Derived defaults (not asked, change if wrong):
 - Refuse to turn ON if on battery and already ≤ 20%.
-- **No polling loop.** Event-driven only, see §3a (CPU budget, added after Arhan flagged CPU cost).
+- Low battery override (2026-10-13, added on request): at ≤ 20% on battery the menu offers each duration as "anyway (low battery)". A session started that way uses a 5% cutoff instead of 20%, for that session only. At ≤ 5% nothing can be turned on. Timer, heat and unknown rules are unchanged.
+- **No polling loop.** Event-driven only, see §3a (CPU budget, added after CPU cost was flagged).
 - Notification 5 min before timer expiry, with "+1h" action.
 - Consequence of Q6+Q7: a crash while in a bag ends the override → Mac sleeps. Accepted: that's the safe side.
 - Consequence of Q6: manual `sudo pmset -a disablesleep 1` stops working while the app runs.
+- Consequence of Q10: Wi-Fi that stays connected but has no internet (dead router) is not detected; only losing the network is. Accepted: the case is leaving range.
+- Consequence of Q10: if home Wi-Fi returns during the few seconds a join is running, the Mac can still end up on the hotspot. Accepted: lid open says so.
+- Consequence of Q9: `kill -9` / crash while the speakers are held muted leaves them muted (previous state is only in memory). Accepted: silent is the safe side; unmute by hand.
 
 ## 1. Goal
 
@@ -98,6 +104,8 @@ How that's achieved: every signal comes from an OS event, read in-process:
 | Thermal | `ProcessInfo.thermalStateDidChangeNotification` (fires on state change) |
 | Lid close/open | IOKit interest notification on `IOPMrootDomain` (`kIOPMMessageClamshellStateChange`) |
 | SleepDisabled flag | read with `IORegistryEntryCreateCFProperty` on: launch, lid close, wake, menu open, after each write, + 1 safety check every 5 min (timer leeway 60s so macOS can coalesce) |
+| Speaker mute changed (Q9) | CoreAudio property listener on the built-in speaker device (fires only on a mute change) |
+| Network lost / back (Q10) | `NWPathMonitor` (fires only on a path change). One one-shot retry timer exists only during an outage with the lid closed; the Wi-Fi scan + join run in-process (CoreWLAN) off the main thread, so no cutoff ever waits on them |
 | Auto-off timer | one one-shot timer at the deadline (not ticking every second) |
 | Countdown text | computed only while the menu is open |
 
@@ -145,12 +153,17 @@ Resolved — see §0 Q1, Q2, Q5–Q7.
 | T15 | macOS update resets pmset/sudoers | detect + prompt reinstall | check after update |
 | T16 | External display + AC (native clamshell) | app irrelevant; should not interfere | plug display |
 | T19 | Lid closed + on battery at 'fair', then plug in AC | re-evaluated with AC rule (serious); already-OFF stays OFF | policy unit test |
+| T20 | ON, sound playing from speakers, close lid; then unmute from outside; then open lid | silent within the lid event; re-muted at once; on open, mute state as before closing | policy unit tests for the rule; real lid: play audio, close, `osascript -e 'set volume without output muted'` over ssh, open, read log |
+| T21 | ON, lid closed, walk out of Wi-Fi range with the phone | on the hotspot ~10–20 s after Wi-Fi is lost; job keeps its network; lid open → notification + menu line | real lid + phone; `grep hotspot ~/Library/Logs/lidswitch.log` |
+| T22 | Same, but phone left behind / hotspot off | tries for 5 min, then one notification; override still ON, timer and cutoffs unaffected | policy unit tests for the schedule; real: turn off Wi-Fi router with phone hotspot disabled |
+| T23 | Wi-Fi lost with lid open, or override OFF | nothing happens | policy unit tests; real: leave range with lid open |
+| T24 | `./update.sh` after the hotspot is saved | password still readable, no Location prompt | rebuild, then T21 |
 | T17 | CPU idle budget | < 0.1% avg over 10 min, 0 child processes, RSS < 30 MB, in both states | `top -l 60 -s 10 -pid <pid>`; `pgrep -P <pid>` |
 | T18 | Wakeups budget | ≤ 1 timer wakeup / 5 min idle | `sudo powermetrics --samplers tasks -i 60000 -n 10`, filter pid |
 
 Unit-testable without root: state parsing (ioreg/pmset output fixtures), policy engine
 (battery %, AC, thermal, timer → desired state). Root-requiring tests (T1, T2, T5, T9)
-are manual checklists run once by Arhan.
+are manual checklists run once by the author.
 
 ## 6. Build order (after grilling)
 1. Policy engine (pure Swift, inputs → desired state) + unit tests for every §0 rule.

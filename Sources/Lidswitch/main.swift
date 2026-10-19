@@ -28,6 +28,19 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
     var noNap: NSObjectProtocol?  // held only while ON so App Nap can't delay the auto-off
     var caffeinated: [Caffeinate.Proc] = []
     var caffeineWatch: [pid_t: DispatchSourceProcess] = [:]  // exit events, so the icon updates without polling
+    var speakerWasMuted: Bool?  // non-nil while we hold the speakers muted (Q9): the state to put back
+
+    var lowBatteryOK = false       // this session was started with "anyway (low battery)": stops at 5%, not 20%
+
+    // Q10 hotspot failover.
+    var online = true              // the Mac has a working network (any interface)
+    var outageStart: Date?         // set while a join cycle is running, or has given up, for this outage
+    var hotspotAttempts = 0
+    var hotspotTimer: Timer?       // exists only during an outage
+    var hotspotJoining = false
+    var hotspotJoinedAt: Date?     // we joined it and, as far as we know, are still on it
+    var hotspotTold = false        // the lid-open notification for hotspotJoinedAt was shown
+    var hotspotNote: String?       // why the last join did not work
 
     var canNotify: Bool { Bundle.main.bundleIdentifier != nil }
 
@@ -40,6 +53,15 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
         DistributedNotificationCenter.default().addObserver(
             forName: App.showMenuNote, object: nil, queue: .main
         ) { [weak self] _ in self?.showMenu() }
+        // Never shown (menu bar only app); it exists so ⌘V/⌘C/⌘X/⌘A work in the hotspot dialog.
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let main = NSMenu()
+        main.addItem(withTitle: "Edit", action: nil, keyEquivalent: "").submenu = edit
+        NSApp.mainMenu = main
         ruleInstalled = SystemState.sudoRuleInstalled()
         if !ruleInstalled { error = "sudo rule missing, run install.sh" }
 
@@ -65,6 +87,11 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
         ) { [weak self] _ in self?.reevaluate("wake") }
         watchLid()
+        Speaker.onMuteChange { [weak self] in self?.syncSpeaker() }
+        Hotspot.onNetworkChange { [weak self] up in
+            self?.online = up
+            self?.syncHotspot()
+        }
 
         let t = Timer(timeInterval: 300, repeats: true) { [weak self] _ in self?.reevaluate("safety") }
         t.tolerance = 60
@@ -87,6 +114,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
             SystemState.setSleepDisabled(false)
             Log.write("quit → OFF (flag now \(flagText()))")
         }
+        if speakerWasMuted == false { Speaker.setMuted(false) }
         return .terminateNow
     }
 
@@ -125,7 +153,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
         let (bat, pct) = SystemState.power()
         return Snapshot(now: Date(), flagOn: SystemState.sleepDisabled(), owned: owned, deadline: deadline,
                         onBattery: bat, batteryPercent: pct, lidClosed: SystemState.lidClosed(),
-                        thermal: SystemState.thermal())
+                        thermal: SystemState.thermal(), lowBatteryOK: lowBatteryOK)
     }
 
     func reevaluate(_ why: String) {
@@ -137,11 +165,92 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
         if s.flagOn != false, let reason = Policy.evaluate(s) {
             turnOff(reason.rawValue)
         }
+        syncSpeaker()
+        syncHotspot()
         updateIcon()
     }
 
-    func turnOn(_ duration: TimeInterval) {
-        let s = snapshot()
+    /// Q10: Wi-Fi gone while ON with the lid closed → join the iPhone hotspot. Called on every event
+    /// and on every network change. Never touches the override, and never leaves a network.
+    func syncHotspot() {
+        let lid = SystemState.lidClosed()
+        if lid == false, let at = hotspotJoinedAt, !hotspotTold {
+            hotspotTold = true
+            notify("On your iPhone hotspot", "Joined at \(clock(at)) while the lid was closed. Switch Wi-Fi yourself when you're ready.")
+        }
+        guard Hotspot.ssid != nil, !online, Policy.hotspotArmed(owned: owned, lidClosed: lid) else {
+            if outageStart != nil { Log.write("hotspot: stopped trying (\(online ? "network is back" : "lid open or override off"))") }
+            outageStart = nil; hotspotAttempts = 0
+            hotspotTimer?.invalidate(); hotspotTimer = nil
+            return
+        }
+        guard outageStart == nil else { return }  // this outage already has a cycle running, or gave up
+        outageStart = Date()
+        Log.write("network lost with lid closed → hotspot in \(Int(Policy.hotspotWait))s if it stays down")
+        scheduleHotspot()
+    }
+
+    func scheduleHotspot() {
+        guard let start = outageStart else { return }
+        guard let delay = Policy.hotspotRetry(attempt: hotspotAttempts, elapsed: Date().timeIntervalSince(start)) else {
+            Log.write("hotspot: gave up after \(hotspotAttempts) tries (\(hotspotNote ?? "no reason recorded"))")
+            notify("Hotspot not joined", "Gave up after 5 min. The lid override is still on.")
+            return
+        }
+        hotspotTimer?.invalidate()
+        let t = Timer(timeInterval: delay, repeats: false) { [weak self] _ in self?.tryHotspot() }
+        t.tolerance = 1
+        RunLoop.main.add(t, forMode: .common)
+        hotspotTimer = t
+    }
+
+    func tryHotspot() {
+        guard outageStart != nil, !hotspotJoining, let ssid = Hotspot.ssid else { return }
+        hotspotJoining = true
+        hotspotAttempts += 1
+        let n = hotspotAttempts
+        Hotspot.join(ssid) { [weak self] result in
+            guard let self else { return }
+            self.hotspotJoining = false
+            switch result {
+            case .joined:
+                self.hotspotJoinedAt = Date(); self.hotspotTold = false; self.hotspotNote = nil
+            case .notFound: self.hotspotNote = "hotspot not found (phone nearby, hotspot allowed?)"
+            case .noPassword: self.hotspotNote = "hotspot password unreadable, set it again"
+            case .failed(let why): self.hotspotNote = "hotspot join failed: \(why)"
+            }
+            Log.write("hotspot try \(n): \(self.hotspotNote ?? "joined")")
+            // Joined but still offline (no cellular?) is retried like any other miss.
+            self.scheduleHotspot()
+        }
+    }
+
+    func clock(_ d: Date) -> String {
+        DateFormatter.localizedString(from: d, dateStyle: .none, timeStyle: .short)
+    }
+
+    /// Q9: no sound from the built-in speakers while ON with the lid closed. Called on every event
+    /// and whenever the mute changes, so an unmute from anywhere is undone at once.
+    func syncSpeaker() {
+        let hold = Policy.holdSpeakerMute(holding: speakerWasMuted != nil, owned: owned,
+                                          lidClosed: SystemState.lidClosed())
+        if hold {
+            guard let muted = Speaker.muted() else { return }
+            let first = speakerWasMuted == nil
+            if first { speakerWasMuted = muted }
+            if !muted {
+                let ok = Speaker.setMuted(true)
+                Log.write("\(first ? "ON with lid closed" : "speakers unmuted with lid closed") → muted (\(ok ? "ok" : "FAILED"))")
+            }
+        } else if let was = speakerWasMuted {
+            speakerWasMuted = nil
+            if !was { Log.write("lid open → speakers unmuted (\(Speaker.setMuted(false) ? "ok" : "FAILED"))") }
+        }
+    }
+
+    func turnOn(_ duration: TimeInterval, lowBatteryOK low: Bool = false) {
+        var s = snapshot()
+        s.lowBatteryOK = low
         if let r = Policy.canTurnOn(s, duration: duration) {
             notify("Not turned on", r.rawValue)
             Log.write("refused ON: \(r.rawValue)")
@@ -156,10 +265,13 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
         }
         error = ruleInstalled ? nil : error
         owned = true
+        lowBatteryOK = low
         noNap = ProcessInfo.processInfo.beginActivity(
             options: .userInitiatedAllowingIdleSystemSleep, reason: "lid override auto-off timer")
         setDeadline(Date().addingTimeInterval(duration))
-        Log.write("ON for \(Int(duration / 60))m, until \(deadline!)")
+        Log.write("ON for \(Int(duration / 60))m, until \(deadline!)\(low ? " (low battery accepted, stops at \(Policy.batteryFloor)%)" : "")")
+        syncSpeaker()
+        syncHotspot()
         updateIcon()
     }
 
@@ -182,6 +294,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
             Log.write("OFF FAILED (\(reason)), flag=\(flagText())")
             notify("lidswitch could NOT restore lid sleep", "Run: sudo pmset -a disablesleep 0")
         }
+        syncHotspot()
         updateIcon()
     }
 
@@ -211,7 +324,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
     }
 
     func clearOwned() {
-        owned = false; deadline = nil
+        owned = false; deadline = nil; lowBatteryOK = false
         if let a = noNap { ProcessInfo.processInfo.endActivity(a); noNap = nil }
         deadlineTimer?.invalidate(); warnTimer?.invalidate()
         deadlineTimer = nil; warnTimer = nil
@@ -274,10 +387,18 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
             action("+1 hour", #selector(menuExtend))
             action("Turn off now", #selector(menuOff))
         } else if ruleInstalled {
+            // Battery at or below 20%: the same choices, but picking one accepts running down to 5%.
+            let low = Policy.canTurnOn(s, duration: Policy.defaultDuration) == .battery
+                && (s.batteryPercent ?? 0) > Policy.batteryFloor
+            if low { info("Battery low. These stop at \(Policy.batteryFloor)% instead of \(Policy.batteryCutoff)%:") }
             for d in Policy.allowedDurations {
                 let min = Int(d / 60)
                 let label = min < 60 ? "\(min) min" : "\(min / 60) hour\(min == 60 ? "" : "s")"
-                action("Stay awake \(label)\(d == Policy.defaultDuration ? " (default)" : "")", #selector(menuOn), min)
+                if low {
+                    action("Stay awake \(label) anyway (low battery)", #selector(menuOnLow), min)
+                } else {
+                    action("Stay awake \(label)\(d == Policy.defaultDuration ? " (default)" : "")", #selector(menuOn), min)
+                }
             }
         }
         if let l = lastOff { menu.addItem(.separator()); info("Last auto-off: \(l)") }
@@ -301,6 +422,20 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
         c.submenu = sub
         menu.addItem(c)
 
+        // Hotspot failover (Q10).
+        menu.addItem(.separator())
+        if let ssid = Hotspot.ssid {
+            if let cur = Hotspot.currentSSID(), cur != ssid { hotspotJoinedAt = nil }  // you moved off it
+            info("Hotspot if Wi-Fi drops (lid closed): \(ssid)")
+            if let at = hotspotJoinedAt { info("On hotspot since \(clock(at)) (joined by lidswitch)") }
+            if let n = hotspotNote { info("⚠ \(n)") }
+            if Hotspot.locationDenied { info("⚠ Location Services off for lidswitch: hotspot may not be found") }
+            action("Change hotspot…", #selector(menuSetHotspot))
+            action("Forget hotspot", #selector(menuForgetHotspot))
+        } else {
+            action("Set hotspot for when Wi-Fi drops…", #selector(menuSetHotspot))
+        }
+
         menu.addItem(.separator())
         action("Quit (restores lid sleep)", #selector(menuQuit))
     }
@@ -314,7 +449,45 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
         let ok = Caffeinate.stop(pid_t(i.tag))
         Log.write("caffeinate pid \(i.tag) stop \(ok ? "sent" : "FAILED")")
     }
+    @objc func menuSetHotspot() {
+        let name = NSTextField(string: Hotspot.ssid ?? "")
+        name.placeholderString = "Hotspot name, exactly as the iPhone shows it"
+        name.frame = NSRect(x: 0, y: 32, width: 280, height: 24)
+        let pass = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        pass.placeholderString = "Hotspot password"
+        let fields = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 56))
+        fields.addSubview(name); fields.addSubview(pass)
+        name.nextKeyView = pass
+
+        let a = NSAlert()
+        a.messageText = "iPhone hotspot"
+        a.informativeText = "Joined by itself if Wi-Fi stays down for \(Int(Policy.hotspotWait)) seconds while the lid override is on and the lid is closed. The password is kept in your Keychain."
+        a.accessoryView = fields
+        a.addButton(withTitle: "Save")
+        a.addButton(withTitle: "Cancel")
+        a.window.initialFirstResponder = name
+        NSApp.activate(ignoringOtherApps: true)
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+
+        let ssid = name.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !ssid.isEmpty, !pass.stringValue.isEmpty else {
+            notify("Hotspot not saved", "Both the name and the password are needed.")
+            return
+        }
+        let ok = Hotspot.save(ssid: ssid, password: pass.stringValue)
+        hotspotNote = ok ? nil : "could not save the hotspot password to the Keychain"
+        hotspotJoinedAt = nil
+        Log.write("hotspot set to \"\(ssid)\" (\(ok ? "ok" : "Keychain save FAILED"))")
+        syncHotspot()
+    }
+    @objc func menuForgetHotspot() {
+        Hotspot.forget()
+        hotspotNote = nil; hotspotJoinedAt = nil
+        Log.write("hotspot forgotten")
+        syncHotspot()
+    }
     @objc func menuOn(_ i: NSMenuItem) { turnOn(TimeInterval(i.tag * 60)) }
+    @objc func menuOnLow(_ i: NSMenuItem) { turnOn(TimeInterval(i.tag * 60), lowBatteryOK: true) }
     @objc func menuOff() { turnOff("turned off by you") }
     @objc func menuExtend() { extend() }
     @objc func menuQuit() { NSApp.terminate(nil) }
